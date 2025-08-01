@@ -1,0 +1,3 @@
+[submodule "lib/iotcore"]
+	path = lib/iotcore
+	url = https://github.com/SmartThingsCommunity/st-device-sdk-c.git

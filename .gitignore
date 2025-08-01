@@ -1,0 +1,8 @@
+build/
+managed_components/
+.cache/
+
+dependencies.lock
+
+**/onboarding_config.json
+**/device_info.json
