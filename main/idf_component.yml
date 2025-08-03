@@ -4,3 +4,4 @@ dependencies:
     version: '>=4.1.0'
 
   espressif/libsodium: ^1.0.20~2
+  espressif/bme280: ^0.1.1
