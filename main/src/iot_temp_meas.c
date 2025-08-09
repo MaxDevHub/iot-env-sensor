@@ -32,7 +32,6 @@ void iot_temp_meas_send_value(iot_temp_meas_data_t *iot_data) {
       caps_helper_temperatureMeasurement.attr_temperature.name, iot_data->value,
       iot_data->unit, NULL, seq_no);
 
-  if (seq_no) {
-    ESP_LOGE(TAG_LOG, "Error send value");
-  }
+  if (seq_no < 0)
+    ESP_LOGE(TAG_LOG, "Error send value: %d", seq_no);
 }

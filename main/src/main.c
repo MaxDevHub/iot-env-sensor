@@ -7,7 +7,6 @@
 
 #include "bme280.h"
 #include "button_gpio.h"
-#include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -35,7 +34,10 @@ extern const uint8_t
 extern const uint8_t device_info_start[] asm("_binary_device_info_json_start");
 extern const uint8_t device_info_end[] asm("_binary_device_info_json_end");
 
-iot_status_t g_iot_status = IOT_STATUS_IDLE;
+static iot_status_t g_iot_status = IOT_STATUS_IDLE;
+static iot_stat_lv_t g_iot_stat_lv;
+
+static TaskHandle_t task_measurment_handle = NULL;
 
 // IOT
 static IOT_CTX iot_ctx = NULL;
@@ -75,15 +77,21 @@ static void bme280_init() {
 static button_handle_t button_control = NULL;
 
 static void button_single_click_cb(void *arg, void *usr_data) {
-  ESP_LOGI(LOG_TAG, "Single click");
-  st_conn_ownership_confirm(iot_ctx, true);
+  if (g_iot_status == IOT_STATUS_NEED_INTERACT)
+    st_conn_ownership_confirm(iot_ctx, true);
 }
 
-static void button_long_press_cb(void *arg, void *usr_data) {};
+static void button_long_press_cb(void *arg, void *usr_data) {
+  if (task_measurment_handle != NULL)
+    vTaskDelete(task_measurment_handle);
+
+  st_conn_cleanup(iot_ctx, true);
+};
 
 static void button_control_init() {
-  const button_config_t btn_conf = {0};
-  const button_gpio_config_t btn_gpio_conf = {.gpio_num = GPIO_NUM_2,
+  const button_config_t btn_conf = {.short_press_time = 180,
+                                    .long_press_time = 2000};
+  const button_gpio_config_t btn_gpio_conf = {.gpio_num = CONTROL_BUTTON_PIN,
                                               .active_level = 1};
 
   iot_button_new_gpio_device(&btn_conf, &btn_gpio_conf, &button_control);
@@ -117,6 +125,25 @@ static void task_measurment(void *arg) {
   }
 }
 
+static void iot_status_cb(iot_status_t status, iot_stat_lv_t stat_lv,
+                          void *usr_data) {
+  g_iot_status = status;
+  g_iot_stat_lv = stat_lv;
+
+  ESP_LOGI(LOG_TAG, "IoT callback status: %d, stat_lv: %d", g_iot_status,
+           g_iot_stat_lv);
+
+  switch (status) {
+  case IOT_STATUS_CONNECTING:
+    if (stat_lv == IOT_STAT_LV_DONE && task_measurment_handle != NULL)
+      xTaskCreate(task_measurment, "task_measurment", 4096, NULL, 10,
+                  &task_measurment_handle);
+    break;
+  default:
+    break;
+  }
+}
+
 void app_main(void) {
   unsigned char *onboarding_config = (unsigned char *)onboarding_config_start;
   unsigned int onboarding_config_len =
@@ -136,7 +163,5 @@ void app_main(void) {
   bme280_init();
   button_control_init();
 
-  st_conn_start(iot_ctx, NULL, IOT_STATUS_ALL, NULL, NULL);
-
-  xTaskCreate(task_measurment, "task_measurment", 4096, NULL, 10, NULL);
+  st_conn_start(iot_ctx, iot_status_cb, IOT_STATUS_ALL, NULL, NULL);
 }
