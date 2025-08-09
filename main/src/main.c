@@ -37,16 +37,93 @@ extern const uint8_t device_info_end[] asm("_binary_device_info_json_end");
 static iot_status_t g_iot_status = IOT_STATUS_IDLE;
 static iot_stat_lv_t g_iot_stat_lv;
 
-static TaskHandle_t task_measurment_handle = NULL;
+static TaskHandle_t task_send_measurments_handle = NULL;
 
 // IOT
 static IOT_CTX iot_ctx = NULL;
 static iot_temp_meas_data_t *iot_temp_meas = NULL;
 static iot_hum_meas_data_t *iot_hum_meas = NULL;
 
+static void iot_status_cb(iot_status_t status, iot_stat_lv_t stat_lv,
+                          void *usr_data);
+static void task_send_measurments(void *pvParameters);
+
 // BME280
 static bme280_handle_t bme280 = NULL;
 static i2c_bus_handle_t i2c_bus = NULL;
+static void bme280_init();
+
+// Button control device
+static button_handle_t button_control = NULL;
+static void button_control_init();
+static void button_single_click_cb(void *arg, void *usr_data);
+static void button_long_press_cb(void *arg, void *usr_data);
+
+// Connection functions
+static void connection_start();
+static void task_connection_start(void *pvParameters);
+
+void app_main(void) {
+  unsigned char *onboarding_config = (unsigned char *)onboarding_config_start;
+  unsigned int onboarding_config_len =
+      onboarding_config_end - onboarding_config_start;
+  unsigned char *device_info = (unsigned char *)device_info_start;
+  unsigned int device_info_len = device_info_end - device_info_start;
+
+  iot_ctx = st_conn_init(onboarding_config, onboarding_config_len, device_info,
+                         device_info_len);
+
+  if (!iot_ctx)
+    ESP_LOGE(LOG_TAG, "IOT_CTX create failed");
+
+  iot_temp_meas = iot_temp_meas_create(iot_ctx, "main");
+  iot_hum_meas = iot_hum_meas_create(iot_ctx, "main");
+
+  bme280_init();
+  button_control_init();
+
+  connection_start();
+}
+
+static void iot_status_cb(iot_status_t status, iot_stat_lv_t stat_lv,
+                          void *usr_data) {
+  g_iot_status = status;
+  g_iot_stat_lv = stat_lv;
+
+  ESP_LOGI(LOG_TAG, "IoT callback status: %d, stat_lv: %d", g_iot_status,
+           g_iot_stat_lv);
+
+  switch (status) {
+  case IOT_STATUS_CONNECTING:
+    if (stat_lv == IOT_STAT_LV_DONE && task_send_measurments_handle == NULL)
+      xTaskCreate(task_send_measurments, "task_send_measurments", 4096, NULL,
+                  10, &task_send_measurments_handle);
+    break;
+  default:
+    break;
+  }
+}
+
+static void task_send_measurments(void *pvParameters) {
+  for (;;) {
+    bme280_take_forced_measurement(bme280);
+
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    float temp = 0.0f, hum = 0.0f;
+
+    bme280_read_temperature(bme280, &temp);
+    bme280_read_humidity(bme280, &hum);
+
+    iot_temp_meas->value = (double)temp;
+    iot_hum_meas->value = (double)hum;
+
+    iot_temp_meas_send_value(iot_temp_meas);
+    iot_hum_meas_send_value(iot_hum_meas);
+
+    vTaskDelay(pdMS_TO_TICKS(1000 * 60 * 5)); // 5 minutes
+  }
+}
 
 static void bme280_init() {
   i2c_config_t conf = {
@@ -73,21 +150,6 @@ static void bme280_init() {
                       BME280_FILTER_X16, BME280_STANDBY_MS_1000);
 }
 
-// Button control device
-static button_handle_t button_control = NULL;
-
-static void button_single_click_cb(void *arg, void *usr_data) {
-  if (g_iot_status == IOT_STATUS_NEED_INTERACT)
-    st_conn_ownership_confirm(iot_ctx, true);
-}
-
-static void button_long_press_cb(void *arg, void *usr_data) {
-  if (task_measurment_handle != NULL)
-    vTaskDelete(task_measurment_handle);
-
-  st_conn_cleanup(iot_ctx, true);
-};
-
 static void button_control_init() {
   const button_config_t btn_conf = {.short_press_time = 180,
                                     .long_press_time = 2000};
@@ -104,64 +166,30 @@ static void button_control_init() {
                          button_long_press_cb, NULL);
 }
 
-static void task_measurment(void *arg) {
-  for (;;) {
-    bme280_take_forced_measurement(bme280);
-
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    float temp = 0.0f, hum = 0.0f;
-
-    bme280_read_temperature(bme280, &temp);
-    bme280_read_humidity(bme280, &hum);
-
-    iot_temp_meas->value = (double)temp;
-    iot_hum_meas->value = (double)hum;
-
-    iot_temp_meas_send_value(iot_temp_meas);
-    iot_hum_meas_send_value(iot_hum_meas);
-
-    vTaskDelay(pdMS_TO_TICKS(1000 * 60 * 5)); // 5 minutes
-  }
+static void button_single_click_cb(void *arg, void *usr_data) {
+  if (g_iot_status == IOT_STATUS_NEED_INTERACT)
+    st_conn_ownership_confirm(iot_ctx, true);
 }
 
-static void iot_status_cb(iot_status_t status, iot_stat_lv_t stat_lv,
-                          void *usr_data) {
-  g_iot_status = status;
-  g_iot_stat_lv = stat_lv;
+static void button_long_press_cb(void *arg, void *usr_data) {
+  if (task_send_measurments_handle != NULL)
+    vTaskDelete(task_send_measurments_handle);
 
-  ESP_LOGI(LOG_TAG, "IoT callback status: %d, stat_lv: %d", g_iot_status,
-           g_iot_stat_lv);
+  st_conn_cleanup(iot_ctx, true);
 
-  switch (status) {
-  case IOT_STATUS_CONNECTING:
-    if (stat_lv == IOT_STAT_LV_DONE && task_measurment_handle != NULL)
-      xTaskCreate(task_measurment, "task_measurment", 4096, NULL, 10,
-                  &task_measurment_handle);
-    break;
-  default:
-    break;
-  }
+  xTaskCreate(task_connection_start, "task_connection_start", 4096, NULL, 10,
+              NULL);
+};
+
+static void connection_start() {
+  int err;
+  err = st_conn_start(iot_ctx, iot_status_cb, IOT_STATUS_ALL, NULL, NULL);
+
+  if (err)
+    ESP_LOGE(LOG_TAG, "Connection failed");
 }
 
-void app_main(void) {
-  unsigned char *onboarding_config = (unsigned char *)onboarding_config_start;
-  unsigned int onboarding_config_len =
-      onboarding_config_end - onboarding_config_start;
-  unsigned char *device_info = (unsigned char *)device_info_start;
-  unsigned int device_info_len = device_info_end - device_info_start;
-
-  iot_ctx = st_conn_init(onboarding_config, onboarding_config_len, device_info,
-                         device_info_len);
-
-  if (!iot_ctx)
-    ESP_LOGE(LOG_TAG, "IOT_CTX create failed");
-
-  iot_temp_meas = iot_temp_meas_create(iot_ctx, "main");
-  iot_hum_meas = iot_hum_meas_create(iot_ctx, "main");
-
-  bme280_init();
-  button_control_init();
-
-  st_conn_start(iot_ctx, iot_status_cb, IOT_STATUS_ALL, NULL, NULL);
+static void task_connection_start(void *pvParameters) {
+  connection_start();
+  vTaskDelete(NULL);
 }
