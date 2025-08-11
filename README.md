@@ -37,3 +37,7 @@ source ${IDF_PATH}/export.sh
 idf.py build 
 idf.py flash
 ```
+
+## Wiring Diagram
+
+![Wiring](./assets/images/scheme.png)
